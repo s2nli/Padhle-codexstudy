@@ -25,6 +25,7 @@ function escapeHtml(value = "") {
 }
 
 function categoryFor(batch) {
+  if (batch.category) return String(batch.category).toLowerCase();
   const text = `${batch.name || ""} ${batch.byName || ""}`.toLowerCase();
   if (/\bjee\b|iit/.test(text)) return "jee";
   if (/neet|medical/.test(text)) return "neet";
@@ -73,8 +74,7 @@ function openBatch(batch) {
   if (batch.source === "eduspark") { window.location.href = "padhle.html"; return; }
   if (batch.source === "finish10") { window.location.href = "finish10.html"; return; }
   if (batch.source === "padhle-paid") { window.location.href = "padhle-paid.html"; return; }
-  const name = encodeURIComponent(batch.name || "Course").replace(/%20/g, "+");
-  window.location.href = `https://stream.testuk.org/subjects?batchId=${encodeURIComponent(id)}&batchName=${name}`;
+  window.location.href = `batch.html?id=${encodeURIComponent(id)}`;
 }
 
 function getRecentlyViewed() {
@@ -91,39 +91,102 @@ function addRecentlyViewed(batch) {
   localStorage.setItem("codex-studys-recent", JSON.stringify(recent.slice(0, 8)));
 }
 
+const RECENT_LECTURES_KEY = "codex-studys-recent-lectures";
+const DONE_KEY = "cx-done";
+let recentExpanded = false;
+
+function readJson(key, fallback) {
+  try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v); }
+  catch { return fallback; }
+}
+
+function getRecentLectures() {
+  const list = readJson(RECENT_LECTURES_KEY, []);
+  return Array.isArray(list) ? list.filter((x) => x && x.b && x.i != null).slice(0, 10) : [];
+}
+
+function getDoneMap() {
+  const map = readJson(DONE_KEY, {});
+  return map && typeof map === "object" && !Array.isArray(map) ? map : {};
+}
+
+function formatHms(total) {
+  const t = Math.max(0, Math.floor(Number(total) || 0));
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+  return [h, m, s].map((n) => String(n).padStart(2, "0")).join(":");
+}
+
+function lectureWatchInfo(item) {
+  const id = item.b + "-" + item.i;
+  const dur = Number(readJson("lp:dur:" + id, 0)) || 0;
+  const done = !!getDoneMap()[id];
+  let pos = Number(readJson("lp:pos:" + id, 0)) || 0;
+  if (done) pos = dur;
+  if (dur) pos = Math.min(pos, dur);
+  const pct = done ? 100 : dur ? Math.min(100, Math.round((pos / dur) * 100)) : 0;
+  return { pos, dur, pct, done };
+}
+
+function openRecentLecture(item) {
+  const full = allBatches.find((batch) => (batch._id || batch.batch_id) === item.b);
+  if (full) {
+    addRecentlyViewed(full);
+    try { window.CXProfile && window.CXProfile.trackBatch(full); } catch (e) {}
+  }
+  try { sessionStorage.setItem("cx-scroll", String(Math.round(window.scrollY))); } catch (e) {}
+  window.location.href = `batch.html?id=${encodeURIComponent(item.b)}#lec=${encodeURIComponent(item.i)}`;
+}
+
 function renderRecentlyWatched() {
   const statRecent = document.getElementById("statRecent");
   if (statRecent) statRecent.textContent = String(getRecentlyViewed().length);
   const section = document.getElementById("recentSection");
   const row = document.getElementById("recentRow");
   if (!section || !row) return;
-  const items = getRecentlyViewed();
-  if (!items.length) { section.style.display = "none"; row.innerHTML = ""; return; }
+  const items = getRecentLectures();
+  if (!items.length) { section.style.display = "none"; row.innerHTML = ""; recentExpanded = false; return; }
   section.style.display = "block";
-  row.innerHTML = items.map((item) => `
-    <button class="recent-item" type="button" data-recent-id="${escapeHtml(item._id)}">
-      <img class="recent-thumb" src="${escapeHtml(item.previewImage || FALLBACK_THUMB)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.src='${FALLBACK_THUMB}'">
-      <span class="recent-info">
-        <span class="recent-name">${escapeHtml(item.name || "Course")}</span>
-        <span class="recent-sub">${escapeHtml(item.byName || item.language || "Continue watching")}</span>
+  if (items.length < 2) recentExpanded = false;
+  const viewAll = document.getElementById("recentViewAll");
+  if (viewAll) {
+    viewAll.style.display = items.length > 1 ? "" : "none";
+    viewAll.textContent = recentExpanded ? "Show Less" : "View All ›";
+    viewAll.setAttribute("aria-expanded", recentExpanded ? "true" : "false");
+  }
+  const shown = recentExpanded ? items : items.slice(0, 1);
+  row.innerHTML = shown.map((item, index) => {
+    const info = lectureWatchInfo(item);
+    return `
+    <button class="rw-item${info.done ? " full" : ""}" type="button" data-recent-index="${index}">
+      <img class="rw-thumb" src="${escapeHtml(item.th || FALLBACK_THUMB)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='${FALLBACK_THUMB}'">
+      <span class="rw-info">
+        <span class="rw-name">${escapeHtml(item.t || "Lecture")}</span>
+        <span class="rw-meta"><span>${formatHms(info.pos)} / ${formatHms(info.dur)}</span><span class="rw-pct">Watched: ${info.pct}%</span></span>
+        <span class="rw-bar"><i style="width:${info.pct}%"></i></span>
       </span>
-    </button>`).join("");
-  row.querySelectorAll("[data-recent-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const id = button.dataset.recentId;
-      const full = allBatches.find((batch) => (batch._id || batch.batch_id) === id);
-      openBatch(full || items.find((item) => item._id === id));
-    });
+    </button>`;
+  }).join("");
+  row.querySelectorAll("[data-recent-index]").forEach((button) => {
+    button.addEventListener("click", () => openRecentLecture(shown[Number(button.dataset.recentIndex)]));
   });
 }
 
 function setupRecentlyWatched() {
   renderRecentlyWatched();
+  document.getElementById("recentViewAll")?.addEventListener("click", () => {
+    recentExpanded = !recentExpanded;
+    renderRecentlyWatched();
+  });
   document.getElementById("recentClearBtn")?.addEventListener("click", () => {
-    localStorage.removeItem("codex-studys-recent");
+    localStorage.removeItem(RECENT_LECTURES_KEY);
+    recentExpanded = false;
     renderRecentlyWatched();
     showToast("Recently watched cleared.");
   });
+  const refresh = () => renderRecentlyWatched();
+  window.addEventListener("pageshow", refresh);
+  window.addEventListener("storage", refresh);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 }
 
 function setupQuickInstall() {
@@ -433,7 +496,7 @@ async function loadBatches() {
     const response = await fetch(`batches.json?v=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) throw new Error("Course library unavailable");
     const data = await response.json();
-    const fresh = Array.isArray(data.batches) ? data.batches.slice(0, 4) : [];
+    const fresh = Array.isArray(data.batches) ? data.batches : [];
     const changed = JSON.stringify(fresh) !== JSON.stringify(allBatches);
     allBatches = fresh;
     try { sessionStorage.setItem(BATCH_CACHE_KEY, JSON.stringify(fresh)); sessionStorage.setItem("cx-loaded", "1"); } catch (e) {}
@@ -1269,7 +1332,9 @@ function openDetail(batch) {
     ["Category", categoryFor(batch).toUpperCase()],
     ["Language", batch.language || "Self-paced"],
     ["Starts", formatDate(batch.startDate) || "Anytime"],
-    ["Subjects", String((batch.subBatches || []).length || "—")]
+    ...(batch.lectureCount || batch.noteCount
+      ? [["Lectures", String(batch.lectureCount || "—")], ["Notes", String(batch.noteCount || "—")]]
+      : [["Subjects", String((batch.subBatches || []).length || "—")]])
   ];
   const factsEl = document.getElementById("detailFacts");
   if (factsEl) factsEl.innerHTML = facts.map(([k, v]) => `<div class="detail-fact"><span>${escapeHtml(k)}</span><span>${escapeHtml(String(v))}</span></div>`).join("");
